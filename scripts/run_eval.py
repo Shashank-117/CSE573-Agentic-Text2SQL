@@ -29,19 +29,34 @@ from text2sql_eval.runner import RunConfig, run
 from text2sql_eval.systems import AlwaysUnsupportedSystem, GoldOracleSystem
 
 MANIFEST_FOR = {"spider1": "spider1_dev.jsonl", "spider2_lite": "spider2_lite.jsonl"}
-SYSTEMS = ("oracle", "always_unsupported", "classical")
+SYSTEMS = ("oracle", "always_unsupported", "classical", "single_agent")
 
 
-def _build_system(name: str, evaluator):
-    if name == "oracle":
+def _build_single_agent(args: argparse.Namespace):
+    from text2sql_agents import SingleAgentConfig, SingleAgentSystem
+    from text2sql_llm import GenerationParams, OpenAICompatibleClient
+
+    llm = OpenAICompatibleClient(base_url=args.llm_base_url, model=args.llm_model)
+    params = GenerationParams(temperature=args.temperature, top_p=args.top_p,
+                              max_new_tokens=args.max_new_tokens,
+                              seed=args.seed if args.seed is not None else 0)
+    config = SingleAgentConfig(schema_token_budget=args.schema_token_budget,
+                               schema_top_k=args.schema_top_k, params=params)
+    return SingleAgentSystem(llm, config)
+
+
+def _build_system(args: argparse.Namespace, evaluator):
+    if args.system == "oracle":
         return GoldOracleSystem(evaluator)
-    if name == "always_unsupported":
+    if args.system == "always_unsupported":
         return AlwaysUnsupportedSystem()
-    if name == "classical":
+    if args.system == "classical":
         from text2sql_eval.systems.classical import ClassicalBaselineSystem
 
         return ClassicalBaselineSystem()
-    raise ValueError(f"unknown system {name!r}")
+    if args.system == "single_agent":
+        return _build_single_agent(args)
+    raise ValueError(f"unknown system {args.system!r}")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -51,6 +66,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, help="override manifest path")
     parser.add_argument("--ids", nargs="*", help="only these question IDs")
     parser.add_argument("--limit", type=int, help="only the first N included questions")
+    parser.add_argument("--sample", type=int, help="seeded random sample of N questions (spread across DBs)")
+    parser.add_argument("--sample-seed", type=int, default=0)
     parser.add_argument("--run-id", help="default: <system>_<benchmark>_<UTC timestamp>")
     parser.add_argument("--repeat-index", type=int, default=0)
     parser.add_argument("--seed", type=int)
@@ -60,13 +77,24 @@ def _parse_args() -> argparse.Namespace:
                         help="Spider 1 only: stricter scoring that keeps DISTINCT (official default strips it)")
     parser.add_argument("--resume", action="store_true", help="skip questions already in runs.jsonl")
     parser.add_argument("--notes", default="")
+    llm = parser.add_argument_group("LLM systems")
+    llm.add_argument("--llm-base-url", default="http://localhost:8080/v1",
+                     help="OpenAI-compatible endpoint (llama-server, Ollama, vLLM)")
+    llm.add_argument("--llm-model", default="qwen2.5-coder-7b-instruct")
+    llm.add_argument("--temperature", type=float, default=0.0)
+    llm.add_argument("--top-p", type=float, default=1.0)
+    # 512 truncated 16 Spider 2 attempts in the pilot; 1024 fits the 12k context.
+    llm.add_argument("--max-new-tokens", type=int, default=1024)
+    llm.add_argument("--schema-token-budget", type=int, default=6000)
+    llm.add_argument("--schema-top-k", type=int, help="max tables in prompt (default: all that fit)")
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
     manifest_path = args.manifest or MANIFEST_DIR / MANIFEST_FOR[args.benchmark]
-    entries = select(read_manifest(manifest_path), question_ids=args.ids, limit=args.limit)
+    entries = select(read_manifest(manifest_path), question_ids=args.ids, limit=args.limit,
+                     sample=args.sample, sample_seed=args.sample_seed)
     if not entries:
         raise SystemExit("no included questions selected")
 
@@ -74,7 +102,7 @@ def main() -> None:
     if options and args.benchmark != "spider1":
         raise SystemExit("--keep-distinct only applies to spider1")
     evaluator = get_evaluator(args.benchmark, **options)
-    system = _build_system(args.system, evaluator)
+    system = _build_system(args, evaluator)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_id = args.run_id or f"{system.name}_{args.benchmark}_{stamp}"
     budget = Budget(max_retries=args.max_retries, sql_timeout_s=args.sql_timeout)
@@ -88,8 +116,11 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "config.json").write_text(json.dumps({
         "config": config.to_dict(),
-        "selection": {"ids": args.ids, "limit": args.limit, "n_questions": len(entries)},
+        "selection": {"ids": args.ids, "limit": args.limit, "sample": args.sample,
+                      "sample_seed": args.sample_seed, "n_questions": len(entries),
+                      "question_ids": [e.question_id for e in entries]},
         "evaluator": evaluator.version,
+        "system": system.describe() if hasattr(system, "describe") else {"system": system.name},
         "environment": collect_environment(),
     }, indent=2), encoding="utf-8")
 

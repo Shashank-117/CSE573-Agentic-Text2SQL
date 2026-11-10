@@ -42,6 +42,26 @@ def _strip_literals(sql: str) -> str:
     return _STRING_OR_IDENT.sub(" ", sql)
 
 
+def _forbidden_keywords(sql: str) -> list[str]:
+    """Forbidden words that sqlparse tokenizes as *keywords*.
+
+    Using token types (not bare words) avoids false positives on functions
+    and identifiers: ``REPLACE(name, 'a', 'b')`` is a Name token and is
+    allowed, while ``REPLACE INTO t ...`` is a DML keyword and is rejected.
+    """
+    tokens = [t for t in sqlparse.parse(sql)[0].flatten() if not t.is_whitespace]
+    found = set()
+    for index, token in enumerate(tokens):
+        word = token.value.upper()
+        if token.ttype not in sqlparse.tokens.Keyword or word not in _FORBIDDEN_KEYWORDS:
+            continue
+        # "replace (x, ...)" is a function call: no write statement has "(" next.
+        following = tokens[index + 1].value if index + 1 < len(tokens) else ""
+        if following != "(":
+            found.add(word)
+    return sorted(found)
+
+
 def normalize_sql(sql: str) -> str:
     """Remove comments, surrounding whitespace and trailing semicolons."""
     stripped = sqlparse.format(sql, strip_comments=True).strip()
@@ -68,7 +88,7 @@ def check_read_only(sql: str | None) -> SafetyVerdict:
         first = words[0] if words else "?"
         return SafetyVerdict(False, None, f"statement must start with SELECT/WITH, got {first}")
 
-    forbidden = sorted(set(words) & _FORBIDDEN_KEYWORDS)
+    forbidden = _forbidden_keywords(cleaned)
     if forbidden:
         return SafetyVerdict(False, None, f"forbidden keyword(s): {', '.join(forbidden)}")
 

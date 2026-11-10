@@ -59,6 +59,14 @@ def test_manifest_round_trip_and_select(tmp_path, spider2):
     assert not excluded.included and spider2[0] is not excluded
 
 
+def test_seeded_sample_is_reproducible_and_ordered(spider1):
+    a = select(spider1, sample=50, sample_seed=7)
+    assert a == select(spider1, sample=50, sample_seed=7)
+    assert a != select(spider1, sample=50, sample_seed=8)
+    assert len(a) == 50 and [e.question_id for e in a] == sorted(e.question_id for e in a)
+    assert len({e.db_id for e in a}) > 10  # spread across databases, unlike --limit
+
+
 def test_question_input_has_no_gold_fields():
     names = [f.name.lower() for f in dataclasses.fields(QuestionInput)]
     assert not [n for n in names if any(h in n for h in GOLD_FIELD_HINTS)]

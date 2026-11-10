@@ -72,12 +72,29 @@ def search_docs(query: str, db_id: str, k: int) -> list[RetrievedDoc]   # Retrie
 - Index content: schema docs (`outputs/retrieval/`), ontology entries, business docs.
   Must not be built from dev/test gold SQL.
 
+Interim implementation (Soham, until Jay's index exists): `src/text2sql_retrieval/`
+renders each table as CREATE TABLE text + 3 sample rows and ranks tables with
+BM25 (`rank-bm25`). `select_tables(question, docs, token_budget, top_k)` fills the
+budget with (1) question-matching tables, (2) their foreign-key targets,
+(3) the rest by rank. With the default 6k-token budget every local DB fits
+completely (largest: Baseball, ~4.8k tokens, 26 tables; most tables in one DB: 38),
+so the two-agent system should get the **same** schema access for fairness.
+
 ## 5. LLM inference wrapper (Nolan + Jay + Soham)
 
-**OPEN:** one shared wrapper returning `text, input_tokens, output_tokens, latency_s`,
-logging model id, quantization, temperature, top_p, seed, max_new_tokens.
-Hardware note: Soham's GPU is an RTX 4060 Laptop (8 GB) → 4-bit 7B inference
-fits; QLoRA training likely does not.
+Implemented in `src/text2sql_llm/`: `LLMClient.generate(messages, params) -> Generation`
+(`text, input_tokens, output_tokens, latency_s, model, finish_reason`).
+Token counts come from the server's `usage` field. `OpenAICompatibleClient` works
+with llama.cpp, Ollama and vLLM, so any teammate's GPU can serve the model.
+
+Local serving (pinned, reproducible): `scripts/llm/setup_llama_server.sh` then
+`scripts/llm/start_llama_server.sh` →
+`Qwen/Qwen2.5-Coder-7B-Instruct-GGUF` @ `13fb94bf`, file `q4_k_m` (SHA-256 checked),
+llama-cpp-python 0.3.16 (CUDA 12.4), all 29 layers on GPU, 12k context, chatml.
+Default decoding: temperature 0, top_p 1, seed 0, max 1024 new tokens.
+**OPEN (Nolan):** use this same endpoint/quantization for the two-agent runs.
+Hardware note: Soham's GPU is an RTX 4060 Laptop (8 GB, ~7 GB used while serving);
+QLoRA training will need a bigger GPU.
 
 ## 6. Budgets and safety (everyone)
 

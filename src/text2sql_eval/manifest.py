@@ -8,6 +8,7 @@ subsets are always explicit. Manifests never contain gold SQL or results.
 from __future__ import annotations
 
 import json
+import random
 import re
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -172,12 +173,18 @@ def select(
     entries: Iterable[ManifestEntry],
     question_ids: Iterable[str] | None = None,
     limit: int | None = None,
+    sample: int | None = None,
+    sample_seed: int = 0,
 ) -> list[ManifestEntry]:
-    """Included entries, optionally restricted to IDs and/or the first N."""
+    """Included entries, optionally restricted to IDs, a seeded random sample
+    (kept in manifest order), and/or the first N."""
     chosen = [e for e in entries if e.included]
     if question_ids is not None:
         wanted = set(question_ids)
         chosen = [e for e in chosen if e.question_id in wanted]
+    if sample is not None and sample < len(chosen):
+        picked = set(random.Random(sample_seed).sample(range(len(chosen)), sample))
+        chosen = [e for i, e in enumerate(chosen) if i in picked]
     return chosen[:limit] if limit is not None else chosen
 
 

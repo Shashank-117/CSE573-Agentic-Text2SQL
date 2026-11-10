@@ -41,7 +41,7 @@ def test_mutations_rejected_and_data_unchanged(company_db):
 
 def test_authorizer_blocks_what_static_check_misses(company_db):
     result = run_query(company_db, "SELECT load_extension('evil')")
-    assert result.status == Status.EXECUTION_ERROR
+    assert result.status == Status.UNSAFE_SQL
     assert "not authorized" in result.error
 
 

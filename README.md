@@ -308,3 +308,20 @@ including failures), `results_summary.csv`, `errors.csv` and `config.json`
 | `official/` | Wrappers for test-suite-sql-eval and Spider 2.0-Lite evaluation_suite |
 | `runner.py`, `metrics.py` | Per-question records, EX and cost summaries |
 | `systems/` | Sanity systems (gold oracle, always-unsupported) and classical-baseline adapter |
+
+### Single-agent LLM baseline (`src/text2sql_agents`, `src/text2sql_llm`, `src/text2sql_retrieval`)
+
+Qwen2.5-Coder-7B-Instruct generates SQL directly over the physical schema
+(CREATE TABLE text + sample rows + any benchmark evidence), then the SQL is
+checked, executed read-only, and repaired with the error message up to 3 times.
+Prompts are versioned (`single_agent/v1`); every attempt, token count, latency
+and peak GPU memory is logged per question.
+
+```bash
+bash scripts/llm/setup_llama_server.sh     # once: llama.cpp (CUDA) + pinned Q4_K_M GGUF
+bash scripts/llm/start_llama_server.sh     # serves http://127.0.0.1:8080/v1
+python scripts/run_eval.py --system single_agent --benchmark spider1 --sample 50 --sample-seed 0
+python scripts/run_eval.py --system single_agent --benchmark spider2_lite
+```
+
+Any OpenAI-compatible server works: `--llm-base-url http://host:port/v1 --llm-model <name>`.

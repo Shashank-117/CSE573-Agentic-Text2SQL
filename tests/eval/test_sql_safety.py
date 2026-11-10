@@ -13,6 +13,8 @@ from text2sql_eval.sql_safety import check_read_only, normalize_sql
         'SELECT "update" FROM t',                   # keyword as quoted identifier
         "-- leading comment\nSELECT 1",
         "SELECT created_at, deleted FROM t",        # keyword substrings in names
+        "SELECT REPLACE(name, 'a', 'b') FROM t",    # REPLACE() string function
+        "SELECT replace (name, '-', '') AS n FROM t",
     ],
 )
 def test_accepts_single_read_only_statement(sql):
@@ -35,6 +37,9 @@ def test_accepts_single_read_only_statement(sql):
         ("SELECT 1; DROP TABLE t", "statement"),
         ("SELECT 1; SELECT 2", "statement"),
         ("WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d", "forbidden"),
+        ("WITH c AS (SELECT 1) REPLACE INTO t VALUES (1)", "forbidden"),
+        ("WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c", "forbidden"),
+        ("WITH c AS (SELECT 1) UPDATE t SET a = 1", "forbidden"),
         ("SELECT * FROM t /* */; INSERT INTO t VALUES (1)", "statement"),
     ],
 )

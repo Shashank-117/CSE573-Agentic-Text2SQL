@@ -103,7 +103,12 @@ def _create_views(connection: sqlite3.Connection, views: Iterable[ViewDefinition
 
 
 def _classify_error(exc: sqlite3.Error) -> str:
-    return Status.TIMEOUT if "interrupted" in str(exc).lower() else Status.EXECUTION_ERROR
+    message = str(exc).lower()
+    if "interrupted" in message:
+        return Status.TIMEOUT
+    if "not authorized" in message or "readonly database" in message:
+        return Status.UNSAFE_SQL  # blocked by authorizer / read-only mode
+    return Status.EXECUTION_ERROR
 
 
 def run_query(
