@@ -1,0 +1,112 @@
+"""Run a system through the evaluation harness.
+
+Examples:
+    # Harness self-checks (oracle must be ~100%, unsupported must be 0%)
+    python scripts/run_eval.py --system oracle --benchmark spider1 --limit 50
+    python scripts/run_eval.py --system always_unsupported --benchmark spider2_lite
+
+    # Classical baseline on full Spider 1 dev
+    python scripts/run_eval.py --system classical --benchmark spider1
+
+Outputs go to outputs/runs/<run_id>/: runs.jsonl, results_summary.csv,
+errors.csv, config.json.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+from text2sql_eval.contracts import Budget
+from text2sql_eval.manifest import read_manifest, select
+from text2sql_eval.metrics import load_records, summarize_by_group, write_reports
+from text2sql_eval.official import get_evaluator
+from text2sql_eval.paths import MANIFEST_DIR, RUNS_DIR
+from text2sql_eval.provenance import collect_environment
+from text2sql_eval.runner import RunConfig, run
+from text2sql_eval.systems import AlwaysUnsupportedSystem, GoldOracleSystem
+
+MANIFEST_FOR = {"spider1": "spider1_dev.jsonl", "spider2_lite": "spider2_lite.jsonl"}
+SYSTEMS = ("oracle", "always_unsupported", "classical")
+
+
+def _build_system(name: str, evaluator):
+    if name == "oracle":
+        return GoldOracleSystem(evaluator)
+    if name == "always_unsupported":
+        return AlwaysUnsupportedSystem()
+    if name == "classical":
+        from text2sql_eval.systems.classical import ClassicalBaselineSystem
+
+        return ClassicalBaselineSystem()
+    raise ValueError(f"unknown system {name!r}")
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--system", choices=SYSTEMS, required=True)
+    parser.add_argument("--benchmark", choices=sorted(MANIFEST_FOR), required=True)
+    parser.add_argument("--manifest", type=Path, help="override manifest path")
+    parser.add_argument("--ids", nargs="*", help="only these question IDs")
+    parser.add_argument("--limit", type=int, help="only the first N included questions")
+    parser.add_argument("--run-id", help="default: <system>_<benchmark>_<UTC timestamp>")
+    parser.add_argument("--repeat-index", type=int, default=0)
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--sql-timeout", type=float, default=Budget.sql_timeout_s)
+    parser.add_argument("--max-retries", type=int, default=Budget.max_retries)
+    parser.add_argument("--keep-distinct", action="store_true",
+                        help="Spider 1 only: stricter scoring that keeps DISTINCT (official default strips it)")
+    parser.add_argument("--resume", action="store_true", help="skip questions already in runs.jsonl")
+    parser.add_argument("--notes", default="")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    manifest_path = args.manifest or MANIFEST_DIR / MANIFEST_FOR[args.benchmark]
+    entries = select(read_manifest(manifest_path), question_ids=args.ids, limit=args.limit)
+    if not entries:
+        raise SystemExit("no included questions selected")
+
+    options = {"keep_distinct": True} if args.keep_distinct else {}
+    if options and args.benchmark != "spider1":
+        raise SystemExit("--keep-distinct only applies to spider1")
+    evaluator = get_evaluator(args.benchmark, **options)
+    system = _build_system(args.system, evaluator)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_id = args.run_id or f"{system.name}_{args.benchmark}_{stamp}"
+    budget = Budget(max_retries=args.max_retries, sql_timeout_s=args.sql_timeout)
+    config = RunConfig(
+        run_id=run_id, system_name=system.name, benchmark=args.benchmark,
+        manifest=str(manifest_path), budget=budget,
+        repeat_index=args.repeat_index, seed=args.seed, notes=args.notes,
+    )
+
+    out_dir = RUNS_DIR / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "config.json").write_text(json.dumps({
+        "config": config.to_dict(),
+        "selection": {"ids": args.ids, "limit": args.limit, "n_questions": len(entries)},
+        "evaluator": evaluator.version,
+        "environment": collect_environment(),
+    }, indent=2), encoding="utf-8")
+
+    print(f"Run {run_id}: {len(entries)} questions, system={system.name}, evaluator={evaluator.version}")
+    runs_path = run(system, entries, evaluator, config, out_dir, resume=args.resume)
+    reports = write_reports(runs_path)
+
+    for summary in summarize_by_group(load_records(runs_path)):
+        print(f"\n{summary['system_name']} on {summary['benchmark']}: "
+              f"EX = {summary['correct']}/{summary['evaluated']} = {summary['execution_accuracy']:.4f}")
+        print(f"  executed={summary['executed']}  supported={summary['supported']}  "
+              f"timeouts={summary['n_timeout']}  exec_errors={summary['n_execution_error']}  "
+              f"unsafe={summary['n_unsafe_sql']}  eval_errors={summary['n_eval_error']}")
+    print(f"\nOutputs: {out_dir}")
+    for name, path in reports.items():
+        print(f"  {name}: {path.name}")
+
+
+if __name__ == "__main__":
+    main()

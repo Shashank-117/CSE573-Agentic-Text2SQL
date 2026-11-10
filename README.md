@@ -281,3 +281,30 @@ The major remaining components are:
     - Two-agent proposed system
 
 The current repository provides the dataset, schema, retrieval-document, training-data and classical-baseline foundation for these remaining components.
+## Evaluation Harness (`src/text2sql_eval`)
+
+Shared harness for scoring every system (classical, single-agent LLM, two-agent)
+on identical question IDs with the official benchmark evaluators.
+Interfaces for the team are in [`docs/CONTRACTS.md`](docs/CONTRACTS.md).
+
+```bash
+bash scripts/setup_evaluators.sh            # official Spider 1 evaluator (pinned commit)
+python scripts/build_manifests.py           # manifests/*.jsonl with exclusion reasons
+python scripts/run_eval.py --system oracle --benchmark spider1 --limit 50   # harness self-check
+python scripts/run_eval.py --system classical --benchmark spider1
+pytest tests/eval -q
+```
+
+Each run writes `outputs/runs/<run_id>/` with `runs.jsonl` (one record per question,
+including failures), `results_summary.csv`, `errors.csv` and `config.json`
+(git commit, evaluator version, packages, GPU).
+
+| Module | Purpose |
+|---|---|
+| `contracts.py` | `QuestionInput` (no gold), `PredictionResult`, `Budget`, statuses |
+| `manifest.py` | Question manifests; Spider 2.0-Lite = 135 local SQLite of 547 |
+| `sql_safety.py`, `sandbox.py` | Read-only validation, read-only DB + authorizer, timeouts, TEMP views |
+| `view_composition.py` | Two-agent views → standalone `WITH` query for official scoring |
+| `official/` | Wrappers for test-suite-sql-eval and Spider 2.0-Lite evaluation_suite |
+| `runner.py`, `metrics.py` | Per-question records, EX and cost summaries |
+| `systems/` | Sanity systems (gold oracle, always-unsupported) and classical-baseline adapter |
