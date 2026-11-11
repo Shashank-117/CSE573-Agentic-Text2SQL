@@ -16,3 +16,6 @@ data/bird/*
 !data/bird/.gitkeep
 data/spider2/*
 !data/spider2/.gitkeep
+
+# Official evaluators fetched by scripts/setup_evaluators.sh
+third_party/
