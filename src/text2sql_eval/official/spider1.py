@@ -24,6 +24,7 @@ from ..contracts import EvalOutcome
 from ..paths import SPIDER1_DIR, TEST_SUITE_DIR
 
 EVALUATOR_NAME = "spider1/test-suite-sql-eval"
+UNKNOWN_DIFFICULTY = "unknown"
 
 
 def _evaluator_commit(repo: Path) -> str:
@@ -48,6 +49,15 @@ def _load_exec_eval(repo: Path):
     return importlib.import_module("exec_eval")
 
 
+@lru_cache(maxsize=1)
+def _load_hardness(repo: Path):
+    """Official Spider difficulty classifier (evaluation.Evaluator.eval_hardness)."""
+    _load_exec_eval(repo)  # puts the repo on sys.path
+    evaluation = importlib.import_module("evaluation")
+    process_sql = importlib.import_module("process_sql")
+    return evaluation.Evaluator(), process_sql
+
+
 class Spider1Evaluator:
     """Scores Spider 1.0 predictions; owns access to gold SQL."""
 
@@ -64,6 +74,7 @@ class Spider1Evaluator:
         self.evaluator_repo = Path(evaluator_repo)
         self.keep_distinct = keep_distinct
         self._gold = self._load_gold()
+        self._schemas: dict[str, object] = {}
         mode = "keep_distinct" if keep_distinct else "default"
         self.version = f"{EVALUATOR_NAME}@{_evaluator_commit(self.evaluator_repo)}[{mode}]"
 
@@ -86,6 +97,22 @@ class Spider1Evaluator:
     def gold_sql(self, question_id: str) -> str | None:
         """Gold SQL for sanity-check systems and tests. Never give to a model."""
         return self._gold.get(question_id)
+
+    def difficulty(self, question_id: str, db_path: str) -> str:
+        """Official Spider hardness (easy/medium/hard/extra) of the *gold* query.
+
+        Used only to group results after scoring; never shown to a system.
+        """
+        gold = self._gold.get(question_id)
+        if gold is None:
+            return UNKNOWN_DIFFICULTY
+        try:
+            classifier, process_sql = _load_hardness(self.evaluator_repo)
+            if db_path not in self._schemas:
+                self._schemas[db_path] = process_sql.Schema(process_sql.get_schema(str(db_path)))
+            return classifier.eval_hardness(process_sql.get_sql(self._schemas[db_path], gold))
+        except Exception:  # the official parser rejects a few gold queries
+            return UNKNOWN_DIFFICULTY
 
     def evaluate(self, question_id: str, db_path: str, predicted_sql: str, **_: object) -> EvalOutcome:
         gold = self._gold.get(question_id)

@@ -101,6 +101,16 @@ class PredictionResult:
         return asdict(self)
 
 
+def budget_violations(prediction: "PredictionResult", budget: Budget) -> list[str]:
+    """Budget limits the system's own counters exceed (the harness enforces SQL limits itself)."""
+    checks = (
+        ("model_calls", prediction.model_calls, budget.max_model_calls),
+        ("retries", prediction.retry_count, budget.max_retries),
+        ("input_tokens", prediction.input_tokens, budget.max_total_input_tokens),
+    )
+    return [f"{name} {used} > {limit}" for name, used, limit in checks if (used or 0) > limit]
+
+
 class Text2SQLSystem(Protocol):
     """Adapter interface every system implements."""
 

@@ -296,8 +296,37 @@ pytest tests/eval -q
 ```
 
 Each run writes `outputs/runs/<run_id>/` with `runs.jsonl` (one record per question,
-including failures), `results_summary.csv`, `errors.csv` and `config.json`
+including failures), `results_summary.csv`, `errors.csv`, `results_by_difficulty.csv`
+(Spider 1, official easy/medium/hard/extra) and `config.json`
 (git commit, evaluator version, packages, GPU).
+
+Budgets: the harness enforces SQL timeout and row limits itself, and flags any
+question where a system's reported model calls, retries or input tokens exceed
+the `Budget` (`within_budget`, `budget_violations` per record). Summaries report
+both official EX and `execution_accuracy_within_budget`; matched-budget
+comparisons use the latter.
+
+Plugging in another system (e.g. the two-agent pipeline) without editing the harness:
+
+```bash
+python scripts/run_eval.py --system-module text2sql_two_agent.adapter:build \
+    --system-option views=on --benchmark spider1 --sample 50
+```
+
+`build(args)` gets the parsed CLI arguments (LLM endpoint and decoding settings,
+`args.system_options`) and returns an object with `.name` and
+`.predict(question, budget)`. It never receives the evaluator or gold data.
+
+Analysis across runs:
+
+```bash
+# mean ± sample std over repeats (runs must cover the same questions and scoring mode)
+python scripts/analyze_runs.py aggregate outputs/runs/sa_rep0 outputs/runs/sa_rep1 outputs/runs/sa_rep2
+# paired comparison: per-question table, exact McNemar p, paired bootstrap 95% CI
+python scripts/analyze_runs.py compare outputs/runs/two_agent_rep0 outputs/runs/sa_rep0 --within-budget
+# add difficulty labels to a Spider 1 run made before they existed
+python scripts/analyze_runs.py report outputs/runs/<run_id> --add-difficulty
+```
 
 | Module | Purpose |
 |---|---|
@@ -306,7 +335,8 @@ including failures), `results_summary.csv`, `errors.csv` and `config.json`
 | `sql_safety.py`, `sandbox.py` | Read-only validation, read-only DB + authorizer, timeouts, TEMP views |
 | `view_composition.py` | Two-agent views → standalone `WITH` query for official scoring |
 | `official/` | Wrappers for test-suite-sql-eval and Spider 2.0-Lite evaluation_suite |
-| `runner.py`, `metrics.py` | Per-question records, EX and cost summaries |
+| `runner.py`, `metrics.py` | Per-question records, budget checks, EX / cost / difficulty summaries |
+| `analysis.py` | Repeat aggregation (mean ± std), paired comparison (McNemar, bootstrap CI) |
 | `systems/` | Sanity systems (gold oracle, always-unsupported) and classical-baseline adapter |
 
 ### Single-agent LLM baseline (`src/text2sql_agents`, `src/text2sql_llm`, `src/text2sql_retrieval`)

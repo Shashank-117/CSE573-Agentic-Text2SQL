@@ -13,15 +13,20 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
-from .contracts import Status
+from .contracts import Budget, PredictionResult, Status, budget_violations
 
 SUMMARY_FIELDS = (
     "run_id", "system_name", "benchmark", "repeat_index", "evaluated", "correct", "execution_accuracy",
+    "n_over_budget", "correct_within_budget", "execution_accuracy_within_budget",
     "executed", "execution_success_rate", "supported", "coverage", "accuracy_when_supported",
     "model_calls", "retries", "input_tokens", "output_tokens", "max_input_tokens_single_call",
     "mean_wall_time_s", "p50_wall_time_s", "p90_wall_time_s", "peak_gpu_memory_mb",
     *(f"n_{s}" for s in sorted(Status.ALL)),
 )
+
+DIFFICULTY_ORDER = ("easy", "medium", "hard", "extra", "unknown")
+DIFFICULTY_FIELDS = ("run_id", "system_name", "benchmark", "repeat_index", "difficulty",
+                     "evaluated", "correct", "execution_accuracy")
 
 ERROR_FIELDS = (
     "run_id", "system_name", "benchmark", "question_id", "db_id", "status",
@@ -46,6 +51,19 @@ def _percentile(values: list[float], q: float) -> float | None:
     return ordered[index]
 
 
+def within_budget(record: dict[str, Any]) -> bool:
+    """Harness budget verdict; recomputed with default limits for records that predate it."""
+    if "within_budget" in record:
+        return bool(record["within_budget"])
+    probe = PredictionResult(
+        question_id="", db_id="", system_name="", generated_sql=None,
+        model_calls=int(record.get("model_calls") or 0),
+        retry_count=int(record.get("retry_count") or 0),
+        input_tokens=int(record.get("input_tokens") or 0),
+    )
+    return not budget_violations(probe, Budget())
+
+
 def summarize(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Summary for one homogeneous group (same run, system, benchmark)."""
     rows = list(records)
@@ -57,6 +75,8 @@ def summarize(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     times = [float(r.get("wall_time_s") or 0.0) for r in rows]
     gpu = [r["peak_gpu_memory_mb"] for r in rows if r.get("peak_gpu_memory_mb") is not None]
     first = rows[0] if rows else {}
+    in_budget = [within_budget(r) for r in rows]
+    correct_in_budget = sum(1 for r, ok in zip(rows, in_budget) if ok and r["correct"])
 
     return {
         "run_id": first.get("run_id"),
@@ -66,6 +86,9 @@ def summarize(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "evaluated": total,
         "correct": correct,
         "execution_accuracy": _ratio(correct, total),
+        "n_over_budget": sum(1 for ok in in_budget if not ok),
+        "correct_within_budget": correct_in_budget,
+        "execution_accuracy_within_budget": _ratio(correct_in_budget, total),
         "executed": executed,
         "execution_success_rate": _ratio(executed, total),
         "supported": supported,
@@ -92,6 +115,33 @@ def summarize_by_group(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]
     return [summarize(groups[key]) for key in sorted(groups, key=lambda k: tuple(str(x) for x in k))]
 
 
+def summarize_by_difficulty(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """EX per benchmark difficulty level (Spider 1 easy/medium/hard/extra)."""
+    groups: dict[tuple, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        if record.get("difficulty") is None:
+            continue
+        key = (record["run_id"], record["system_name"], record["benchmark"],
+               record.get("repeat_index"), record["difficulty"])
+        groups[key].append(record)
+
+    def order(key: tuple) -> tuple:
+        level = key[4]
+        rank = DIFFICULTY_ORDER.index(level) if level in DIFFICULTY_ORDER else len(DIFFICULTY_ORDER)
+        return (*(str(x) for x in key[:4]), rank)
+
+    rows = []
+    for key in sorted(groups, key=order):
+        members = groups[key]
+        correct = sum(1 for r in members if r["correct"])
+        rows.append({
+            "run_id": key[0], "system_name": key[1], "benchmark": key[2], "repeat_index": key[3],
+            "difficulty": key[4], "evaluated": len(members), "correct": correct,
+            "execution_accuracy": _ratio(correct, len(members)),
+        })
+    return rows
+
+
 def _write_csv(path: Path, fields: Iterable[str], rows: Iterable[dict[str, Any]]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -107,7 +157,12 @@ def write_reports(runs_path: Path, out_dir: Path | None = None) -> dict[str, Pat
     records = load_records(runs_path)
     summaries = summarize_by_group(records)
     failures = [r for r in records if not r["correct"]]
-    return {
+    reports = {
         "summary": _write_csv(out_dir / "results_summary.csv", SUMMARY_FIELDS, summaries),
         "errors": _write_csv(out_dir / "errors.csv", ERROR_FIELDS, failures),
     }
+    by_difficulty = summarize_by_difficulty(records)
+    if by_difficulty:
+        reports["by_difficulty"] = _write_csv(out_dir / "results_by_difficulty.csv",
+                                              DIFFICULTY_FIELDS, by_difficulty)
+    return reports

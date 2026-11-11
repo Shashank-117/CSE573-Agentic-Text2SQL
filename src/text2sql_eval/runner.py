@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from .contracts import Budget, PredictionResult, QuestionInput, Status, Text2SQLSystem
+from .contracts import Budget, PredictionResult, QuestionInput, Status, Text2SQLSystem, budget_violations
 from .manifest import ManifestEntry, to_question_input
 from .sandbox import ExecResult, database_fingerprint, run_query
 from .view_composition import compose_with_views, views_from_artifacts
@@ -75,6 +75,12 @@ def _system_failure_status(prediction: PredictionResult) -> str | None:
     return None
 
 
+def _difficulty(evaluator: Any, question: QuestionInput) -> str | None:
+    """Benchmark difficulty label, computed after prediction (it is derived from gold)."""
+    classify = getattr(evaluator, "difficulty", None)
+    return classify(question.question_id, question.db_path) if classify else None
+
+
 def _execute(question: QuestionInput, prediction: PredictionResult, budget: Budget) -> tuple[ExecResult, str | None]:
     """Run in the sandbox. Returns the execution result and the scored SQL."""
     try:
@@ -125,6 +131,9 @@ def evaluate_one(
         except Exception as exc:
             status, eval_detail = Status.EVAL_ERROR, f"{type(exc).__name__}: {exc}"
 
+    difficulty = _difficulty(evaluator, question)
+    violations = budget_violations(prediction, config.budget)
+
     if database_fingerprint(question.db_path) != fingerprint:
         raise DatabaseModifiedError(f"{question.db_path} changed while evaluating {question.question_id}")
 
@@ -136,6 +145,9 @@ def evaluate_one(
         "system_status": prediction.status,
         "status": status,
         "correct": bool(correct and status == Status.EXECUTED),
+        "within_budget": not violations,
+        "budget_violations": violations,
+        "difficulty": difficulty,
         "scored_sql": scored_sql,
         "execution_error": _truncate(execution.error),
         "execution_time_s": round(execution.elapsed_s, 4),

@@ -14,3 +14,11 @@ fi
 git -C "$TARGET" fetch --quiet origin
 git -C "$TARGET" checkout --quiet "$PINNED_COMMIT"
 echo "test-suite-sql-eval at $(git -C "$TARGET" rev-parse --short HEAD) -> $TARGET"
+
+# The official Spider difficulty classifier (process_sql.py) tokenizes with NLTK.
+PYTHON="${PYTHON:-$ROOT/.venv/bin/python}"
+if "$PYTHON" -c "import nltk" 2>/dev/null; then
+  "$PYTHON" -c "import nltk; nltk.download('punkt_tab', quiet=True)" && echo "nltk punkt_tab ready"
+else
+  echo "warning: nltk not installed; Spider 1 difficulty will be 'unknown' (pip install -r requirements.txt)"
+fi

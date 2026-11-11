@@ -36,6 +36,11 @@ Defined in `src/text2sql_eval/contracts.py`.
   `peak_gpu_memory_mb=None` if not measured (never 0).
 - The harness — not the system — executes SQL, decides `execution_error`,
   `unsafe_sql`, `view_error`, `eval_error`, and scores correctness.
+- Run your system without editing harness code:
+  `python scripts/run_eval.py --system-module your_package.module:build --system-option key=value ...`.
+  `build(args)` receives the CLI arguments (LLM endpoint, decoding settings,
+  `args.system_options`) and returns an object with `.name` and `.predict()`.
+  It never receives the evaluator or any gold data.
 
 ## 3. Two-agent view artifacts (Nolan)
 
@@ -102,6 +107,12 @@ QLoRA training will need a bigger GPU.
 30 s SQL timeout, 100k result rows. Same budget for both LLM systems in a
 matched comparison; every retry counts toward tokens and latency.
 
+The harness checks each prediction's reported `model_calls`, `retry_count` and
+`input_tokens` against the budget and records `within_budget` /
+`budget_violations`. Official EX is reported unchanged; matched comparisons use
+`execution_accuracy_within_budget` (over-budget answers count as wrong).
+Report these counters honestly — they are the only way the harness can check them.
+
 Execution safety (enforced by harness): single SELECT/WITH only,
 read-only database connection, SQLite authorizer, per-query deadline,
 database fingerprint check after each question (run aborts if any DB changes).
@@ -113,3 +124,12 @@ database fingerprint check after each question (run aborts if any DB changes).
 - Spider 2.0-Lite local: official `evaluation_suite/evaluate.py` comparison
   functions (loaded unmodified; file SHA-256 recorded) against gold CSVs.
 - EX = correct / all included questions. Unsupported, errors and timeouts are failures.
+- Spider 1 results are also broken down by the official difficulty classifier
+  (easy / medium / hard / extra, computed from gold SQL after prediction).
+- Repeated runs: report mean ± sample std over repeats (`analyze_runs.py aggregate`).
+  Runs are only combined if they cover the same questions with the same scoring mode.
+- System comparisons: paired on identical questions (`analyze_runs.py compare`),
+  with an exact McNemar test and a paired bootstrap 95% CI for the EX difference.
+- **OPEN (team):** what varies across the 3 repeats. At temperature 0 repeats are
+  near-identical (std ≈ 0); options are different seeds at a small temperature
+  (e.g. 0.2) or temperature 0 reported as a determinism check.
