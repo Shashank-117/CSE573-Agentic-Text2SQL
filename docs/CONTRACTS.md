@@ -74,6 +74,9 @@ def search_docs(query: str, db_id: str, k: int) -> list[RetrievedDoc]   # Retrie
 ```
 
 - Same index, same `k` and same total search budget for both LLM systems.
+- Same SQL-dialect guidance for both LLM systems: `text2sql_agents.dialect_hints`
+  (`dialect_hints(dialect)`, versioned as `DIALECT_HINTS_VERSION`). Every
+  statement in it is tested against the SQLite engine the harness uses (3.37.2).
 - Index content: schema docs (`outputs/retrieval/`), ontology entries, business docs.
   Must not be built from dev/test gold SQL.
 

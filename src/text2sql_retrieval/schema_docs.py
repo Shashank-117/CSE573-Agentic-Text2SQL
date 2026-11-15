@@ -94,6 +94,22 @@ def _open_read_only(db_path: Path) -> sqlite3.Connection:
 
 
 @lru_cache(maxsize=64)
+def table_columns(db_path: str) -> dict[str, tuple[str, ...]]:
+    """Table name -> column names, read through a read-only connection (cached)."""
+    connection = _open_read_only(Path(db_path))
+    try:
+        tables = [row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+        columns = {}
+        for table in tables:
+            quoted = table.replace('"', '""')
+            columns[table] = tuple(row[1] for row in connection.execute(f'PRAGMA table_info("{quoted}")'))
+        return columns
+    finally:
+        connection.close()
+
+
+@lru_cache(maxsize=64)
 def build_table_docs(db_path: str, db_id: str, sample_rows: int = 3) -> tuple[TableDoc, ...]:
     """All tables of one database as TableDocs (cached per db/sample size)."""
     schema = extract_sqlite_schema(db_path, db_id=db_id)

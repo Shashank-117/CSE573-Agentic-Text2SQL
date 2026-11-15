@@ -19,20 +19,27 @@ from typing import Any
 
 from text2sql_eval.contracts import Budget, PredictionResult, QuestionInput, Status
 from text2sql_eval.sandbox import run_query
-from text2sql_eval.sql_safety import check_read_only
+from text2sql_eval.sql_safety import check_read_only, normalize_sql
 from text2sql_llm import GenerationParams, GpuPeakSampler, LLMClient, LLMError, Message
-from text2sql_retrieval import SchemaSelection, build_table_docs, select_tables
+from text2sql_retrieval import SchemaSelection, build_table_docs, select_tables, table_columns
 
+from .dialect_hints import DIALECT_HINTS_VERSION, dialect_hints
 from .prompts import (
     REPAIR_USER,
+    REPEATED_SQL_NOTE,
     SINGLE_AGENT_PROMPT_VERSION,
+    SINGLE_AGENT_PROMPT_VERSION_V2,
     SINGLE_AGENT_SYSTEM,
+    render_repair_v2,
+    render_single_agent_system_v2,
     render_single_agent_user,
 )
+from .repair_feedback import SchemaIndex, explain_error
 from .sql_extraction import extract_sql
 
 _MAX_LOGGED_OUTPUT = 4_000
 _FEEDBACK_ROWS = 5
+PROMPT_VERSIONS = {"v1": SINGLE_AGENT_PROMPT_VERSION, "v2": SINGLE_AGENT_PROMPT_VERSION_V2}
 
 
 @dataclass(frozen=True)
@@ -45,6 +52,22 @@ class SingleAgentConfig:
     chars_per_token: float = 3.5  # only for budgeting prompts; reports use server counts
     measure_gpu: bool = True
     params: GenerationParams = field(default_factory=GenerationParams)
+    # "v1" reproduces the original baseline exactly. "v2" turns on the three
+    # features below; each can be switched off on its own for ablations.
+    prompt_version: str = "v2"
+    dialect_hints: bool = True       # shared SQLite guidance in the system prompt
+    grounded_feedback: bool = True   # schema-based explanation of database errors
+    repeat_feedback: bool = True     # flag repeated failed SQL, list earlier failures
+
+    def __post_init__(self) -> None:
+        if self.prompt_version not in PROMPT_VERSIONS:
+            raise ValueError(f"prompt_version must be one of {sorted(PROMPT_VERSIONS)}")
+
+    def features(self) -> dict[str, bool]:
+        on = self.prompt_version != "v1"
+        return {"dialect_hints": on and self.dialect_hints,
+                "grounded_feedback": on and self.grounded_feedback,
+                "repeat_feedback": on and self.repeat_feedback}
 
     def estimate_tokens(self, text: str) -> int:
         return int(len(text) / self.chars_per_token) + 1
@@ -59,6 +82,8 @@ class _Attempt:
     latency_s: float
     finish_reason: str | None
     raw_output: str
+    guidance: str = ""
+    repeated: bool = False
 
 
 @dataclass
@@ -85,7 +110,9 @@ class SingleAgentSystem:
     def describe(self) -> dict[str, Any]:
         return {
             "system": self.name,
-            "prompt_version": SINGLE_AGENT_PROMPT_VERSION,
+            "prompt_version": PROMPT_VERSIONS[self.config.prompt_version],
+            "dialect_hints_version": DIALECT_HINTS_VERSION if self.config.features()["dialect_hints"] else None,
+            "features": self.config.features(),
             "llm": self.llm.describe(),
             "config": asdict(self.config),
         }
@@ -111,10 +138,27 @@ class SingleAgentSystem:
             question.question, [t.prompt_text for t in selection.tables],
             self._evidence_text(question), total,
         )
-        system = SINGLE_AGENT_SYSTEM.format(dialect=question.dialect.upper() if question.dialect else "SQL")
+        dialect = question.dialect.upper() if question.dialect else "SQL"
+        if self.config.prompt_version == "v1":
+            system = SINGLE_AGENT_SYSTEM.format(dialect=dialect)
+        else:
+            hints = dialect_hints(question.dialect) if self.config.features()["dialect_hints"] else ""
+            system = render_single_agent_system_v2(dialect, hints)
         return [Message("system", system), Message("user", user)], selection
 
     # --------------------------------------------------------------- loop
+
+    def _schema_index(self, question: QuestionInput) -> SchemaIndex | None:
+        if not self.config.features()["grounded_feedback"]:
+            return None
+        return SchemaIndex.from_tables({t: list(c) for t, c in table_columns(question.db_path).items()})
+
+    def _repair_message(self, attempt: "_Attempt", failed_before: list[str]) -> Message:
+        if self.config.prompt_version == "v1":
+            return Message("user", REPAIR_USER.format(sql=attempt.sql or "(none)", problem=attempt.problem))
+        history = failed_before if self.config.features()["repeat_feedback"] else []
+        return Message("user", render_repair_v2(attempt.sql or "(none)", attempt.problem or "",
+                                                attempt.guidance, history))
 
     def _check(self, sql: str | None, question: QuestionInput, budget: Budget) -> str | None:
         """Return a problem description for the model, or None if SQL is OK."""
@@ -132,6 +176,22 @@ class SingleAgentSystem:
             return "The query ran but returned no rows; check filters and literal values against the sample rows."
         return None
 
+    def _attempt(self, generation: Any, question: QuestionInput, budget: Budget,
+                 schema: SchemaIndex | None, failed: list[str]) -> _Attempt:
+        """Check one model answer and build the feedback for a possible repair."""
+        sql = extract_sql(generation.text)
+        problem = self._check(sql, question, budget)
+        guidance, repeated = "", False
+        if problem is not None and sql:
+            if self.config.features()["grounded_feedback"]:
+                guidance = explain_error(problem, sql, schema)
+            if self.config.features()["repeat_feedback"] and normalize_sql(sql) in failed:
+                repeated = True
+                problem = f"{REPEATED_SQL_NOTE} {problem}"
+        return _Attempt(sql, problem, generation.input_tokens, generation.output_tokens,
+                        round(generation.latency_s, 3), generation.finish_reason,
+                        generation.text[:_MAX_LOGGED_OUTPUT], guidance, repeated)
+
     def _within_budget(self, usage: _Usage, messages: list[Message], budget: Budget) -> bool:
         if usage.calls >= budget.max_model_calls:
             return False
@@ -141,7 +201,9 @@ class SingleAgentSystem:
     def predict(self, question: QuestionInput, budget: Budget) -> PredictionResult:
         started = time.monotonic()
         messages, selection = self.build_messages(question)
+        schema = self._schema_index(question)
         usage, attempts = _Usage(), []
+        failed: list[str] = []  # normalized SQL of earlier failed attempts
         final_sql, stop_reason, error = None, "max_retries", None
 
         with GpuPeakSampler(enabled=self.config.measure_gpu) as gpu:
@@ -155,18 +217,15 @@ class SingleAgentSystem:
                     stop_reason, error = "llm_error", str(exc)
                     break
                 usage.add(generation.input_tokens, generation.output_tokens)
-                sql = extract_sql(generation.text)
-                problem = self._check(sql, question, budget)
-                attempts.append(_Attempt(sql, problem, generation.input_tokens, generation.output_tokens,
-                                         round(generation.latency_s, 3), generation.finish_reason,
-                                         generation.text[:_MAX_LOGGED_OUTPUT]))
-                if problem is None:
-                    final_sql, stop_reason = sql, "ok"
+                attempt = self._attempt(generation, question, budget, schema, failed)
+                attempts.append(attempt)
+                if attempt.problem is None:
+                    final_sql, stop_reason = attempt.sql, "ok"
                     break
-                messages = messages[:2] + [
-                    Message("assistant", generation.text),
-                    Message("user", REPAIR_USER.format(sql=sql or "(none)", problem=problem)),
-                ]
+                messages = messages[:2] + [Message("assistant", generation.text),
+                                           self._repair_message(attempt, failed)]
+                if attempt.sql and not attempt.repeated:
+                    failed.append(normalize_sql(attempt.sql))
 
         last_sql = final_sql or next((a.sql for a in reversed(attempts) if a.sql), None)
         status = "success" if last_sql else (Status.SYSTEM_ERROR if stop_reason == "llm_error" else Status.PARSE_ERROR)
@@ -186,7 +245,8 @@ class SingleAgentSystem:
             referenced_tables=_referenced_tables(last_sql, selection),
             retrieved_document_ids=[t.doc_id for t in selection.tables] + [d.doc_id for d in question.evidence],
             intermediate_artifacts={
-                "prompt_version": SINGLE_AGENT_PROMPT_VERSION,
+                "prompt_version": PROMPT_VERSIONS[self.config.prompt_version],
+                "features": self.config.features(),
                 "stop_reason": stop_reason,
                 "schema_complete": selection.complete,
                 "schema_estimated_tokens": selection.estimated_tokens,
