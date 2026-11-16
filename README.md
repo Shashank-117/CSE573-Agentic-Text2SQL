@@ -344,12 +344,22 @@ python scripts/analyze_runs.py report outputs/runs/<run_id> --add-difficulty
 Qwen2.5-Coder-7B-Instruct generates SQL directly over the physical schema
 (CREATE TABLE text + sample rows + any benchmark evidence), then the SQL is
 checked, executed read-only, and repaired with the error message up to 3 times.
-Prompts are versioned (`single_agent/v1`); every attempt, token count, latency
-and peak GPU memory is logged per question.
+Prompts are versioned; every attempt, token count, latency and peak GPU memory
+is logged per question.
+
+- `single_agent/v2` (default) adds shared SQLite guidance (`text2sql_agents.dialect_hints`,
+  also used by the two-agent system), schema-grounded repair feedback (for example,
+  "column X is not in table T, it exists in U"), and repeated-SQL detection with a
+  history of failed attempts. In the v1 pilot on Spider 2.0-Lite local, 125 of 145
+  `no such column` errors named a column from the wrong table, and many retries
+  resent identical SQL.
+- `--prompt-version v1` reproduces the original baseline. `--no-dialect-hints`,
+  `--no-grounded-feedback` and `--no-repeat-feedback` switch off one v2 feature at a time for ablations.
 
 ```bash
 bash scripts/llm/setup_llama_server.sh     # once: llama.cpp (CUDA) + pinned Q4_K_M GGUF
 bash scripts/llm/start_llama_server.sh     # serves http://127.0.0.1:8080/v1
+bash scripts/llm/stop_llama_server.sh      # frees the GPU when done
 python scripts/run_eval.py --system single_agent --benchmark spider1 --sample 50 --sample-seed 0
 python scripts/run_eval.py --system single_agent --benchmark spider2_lite
 ```

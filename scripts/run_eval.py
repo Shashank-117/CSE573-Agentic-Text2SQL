@@ -48,7 +48,11 @@ def _build_single_agent(args: argparse.Namespace):
                               max_new_tokens=args.max_new_tokens,
                               seed=args.seed if args.seed is not None else 0)
     config = SingleAgentConfig(schema_token_budget=args.schema_token_budget,
-                               schema_top_k=args.schema_top_k, params=params)
+                               schema_top_k=args.schema_top_k, params=params,
+                               prompt_version=args.prompt_version,
+                               dialect_hints=not args.no_dialect_hints,
+                               grounded_feedback=not args.no_grounded_feedback,
+                               repeat_feedback=not args.no_repeat_feedback)
     return SingleAgentSystem(llm, config)
 
 
@@ -125,6 +129,14 @@ def _parse_args() -> argparse.Namespace:
     llm.add_argument("--max-new-tokens", type=int, default=1024)
     llm.add_argument("--schema-token-budget", type=int, default=6000)
     llm.add_argument("--schema-top-k", type=int, help="max tables in prompt (default: all that fit)")
+    agent = parser.add_argument_group("single agent (prompt version and ablations)")
+    agent.add_argument("--prompt-version", choices=("v1", "v2"), default="v2",
+                       help="v1 = original baseline; v2 = SQLite guidance + grounded/repeat repair feedback")
+    agent.add_argument("--no-dialect-hints", action="store_true", help="v2 ablation: drop SQLite guidance")
+    agent.add_argument("--no-grounded-feedback", action="store_true",
+                       help="v2 ablation: plain database errors in repair")
+    agent.add_argument("--no-repeat-feedback", action="store_true",
+                       help="v2 ablation: no repeated-SQL detection or failure history")
     args = parser.parse_args()
     args.system_options = _parse_options(args.system_option)
     return args
