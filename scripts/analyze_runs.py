@@ -9,6 +9,9 @@ Examples:
 
     # Rewrite a run's reports (adds difficulty labels to older Spider 1 runs)
     python scripts/analyze_runs.py report outputs/runs/pilot_single_agent_spider1_s50 --add-difficulty
+
+    # Categorize a Spider 1 run's wrong answers (official component matcher; uses gold SQL post hoc)
+    python scripts/analyze_runs.py errors outputs/runs/v2_spider1_dev --sample 40
 """
 
 from __future__ import annotations
@@ -16,10 +19,13 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from text2sql_eval.analysis import PAIRED_FIELDS, RunMismatchError, aggregate_repeats, compare_runs
+from text2sql_eval.error_analysis import CATEGORY_GROUP, CATEGORY_ORDER, analyze_run
 from text2sql_eval.manifest import read_manifest
 from text2sql_eval.metrics import load_records, summarize_by_difficulty, write_reports
 from text2sql_eval.official import get_evaluator
@@ -94,6 +100,42 @@ def _report(args: argparse.Namespace) -> None:
         print(f"{name}: {path}")
 
 
+ERROR_FIELDS = ("question_id", "db_id", "difficulty", "status", "primary", "categories", "review_label",
+                "predicted_sql", "gold_sql", "detail")
+_DIFFICULTIES = ("easy", "medium", "hard", "extra", "unknown")
+
+
+def _errors(args: argparse.Namespace) -> None:
+    records = load_records(_runs_path(args.run_dir))
+    if {r["benchmark"] for r in records} != {"spider1"}:
+        raise SystemExit("errors only supports Spider 1 runs (Spider 2 gold is result tables, not SQL)")
+    db_paths = {e.question_id: str(PROJECT_ROOT / e.db_path)
+                for e in read_manifest(MANIFEST_DIR / "spider1_dev.jsonl") if e.db_path}
+    errors = analyze_run(records, db_paths, get_evaluator("spider1"))
+    out_dir = args.out or Path(args.run_dir) / "error_analysis"
+    rows = [{**e.__dict__, "categories": "; ".join(e.categories), "review_label": ""} for e in errors]
+    _write_csv(out_dir / "errors_categorized.csv", rows, ERROR_FIELDS)
+
+    primary = Counter(e.primary for e in errors)
+    any_label = Counter(c for e in errors for c in e.categories)
+    by_diff = Counter((e.primary, e.difficulty) for e in errors)
+    summary = [{"group": CATEGORY_GROUP[c], "category": c, "primary": primary[c], "primary_share": round(primary[c] / max(len(errors), 1), 4),
+                "any": any_label[c], **{d: by_diff[(c, d)] for d in _DIFFICULTIES}}
+               for c in CATEGORY_ORDER if any_label[c]]
+    _write_csv(out_dir / "error_summary.csv", summary, list(summary[0]) if summary else ["category"])
+
+    sample = random.Random(args.seed).sample(rows, min(args.sample, len(rows)))
+    _write_csv(out_dir / "review_sample.csv", sample, ERROR_FIELDS)
+
+    print(f"{len(errors)} wrong answers out of {len(records)} ({records[0]['run_id']})")
+    print(f"{'category':58s} primary  share  any-label")
+    for row in summary:
+        print(f"{row['category']:58s} {row['primary']:>7} {row['primary_share']:>6.1%} {row['any']:>9}")
+    groups = Counter(CATEGORY_GROUP[e.primary] for e in errors)
+    print("by group:", ", ".join(f"{g} {n} ({n / max(len(errors), 1):.0%})" for g, n in groups.most_common()))
+    print(f"wrote {out_dir} (fill review_label in review_sample.csv to check the automatic categories)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -119,6 +161,13 @@ def main() -> None:
     rep.add_argument("run_dir", type=Path)
     rep.add_argument("--add-difficulty", action="store_true", help="label Spider 1 records with official difficulty")
     rep.set_defaults(func=_report)
+
+    err = sub.add_parser("errors", help="categorize a Spider 1 run's wrong answers")
+    err.add_argument("run_dir", type=Path)
+    err.add_argument("--sample", type=int, default=40, help="questions to put in review_sample.csv")
+    err.add_argument("--seed", type=int, default=0)
+    err.add_argument("--out", type=Path, help="output directory (default: <run_dir>/error_analysis)")
+    err.set_defaults(func=_errors)
 
     args = parser.parse_args()
     try:

@@ -326,6 +326,8 @@ python scripts/analyze_runs.py aggregate outputs/runs/sa_rep0 outputs/runs/sa_re
 python scripts/analyze_runs.py compare outputs/runs/two_agent_rep0 outputs/runs/sa_rep0 --within-budget
 # add difficulty labels to a Spider 1 run made before they existed
 python scripts/analyze_runs.py report outputs/runs/<run_id> --add-difficulty
+# categorize a Spider 1 run's wrong answers with the official component matcher (post hoc, uses gold SQL)
+python scripts/analyze_runs.py errors outputs/runs/<run_id> --sample 40
 ```
 
 | Module | Purpose |
@@ -337,6 +339,7 @@ python scripts/analyze_runs.py report outputs/runs/<run_id> --add-difficulty
 | `official/` | Wrappers for test-suite-sql-eval and Spider 2.0-Lite evaluation_suite |
 | `runner.py`, `metrics.py` | Per-question records, budget checks, EX / cost / difficulty summaries |
 | `analysis.py` | Repeat aggregation (mean ± std), paired comparison (McNemar, bootstrap CI) |
+| `error_analysis.py` | Spider 1 error categories (join path, columns, conditions, ...) from the official matcher |
 | `systems/` | Sanity systems (gold oracle, always-unsupported) and classical-baseline adapter |
 
 ### Single-agent LLM baseline (`src/text2sql_agents`, `src/text2sql_llm`, `src/text2sql_retrieval`)
